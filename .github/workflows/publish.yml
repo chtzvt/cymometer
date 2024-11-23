@@ -1,0 +1,70 @@
+name: Publish Cymometer
+
+permissions:
+  actions: read
+  contents: read
+  checks: read
+  packages: write
+  statuses: write
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+env:
+  GEM_VERSION: "Cymometer::VERSION" # Should match your <Gem Name>::VERSION
+
+jobs:
+  build-publish:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis
+        ports: ["6379:6379"]
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set Up Ruby
+        uses: ruby/setup-ruby@v1.194.0
+        with:
+          bundler-cache: true
+       
+      - name: Set GitHub Packages & RubyGems Publish API Keys
+        run: |
+          set +x
+          mkdir -p ~/.gem
+          cat << EOF > ~/.gem/credentials
+          ---
+          :github: Bearer ${{ secrets.GITHUB_TOKEN }}
+          :rubygems: ${{ secrets.CYMOMETER_RUBYGEMS_API_KEY }}
+          EOF
+
+          chmod 0600 ~/.gem/credentials
+          set -x
+
+      - name: Set RELEASE_TAG
+        run: echo "RELEASE_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: Set GEM_NAME
+        run: echo "GEM_NAME=$(awk -F'"' '/name *=/ {print $2}' *.gemspec)" >> $GITHUB_ENV
+
+      - name: Validate Gem::VERSION
+        run: bundle exec ruby -e 'raise "invalid Gem::VERSION" unless ${{ env.GEM_VERSION }} == ENV["RELEASE_TAG"]'
+
+      - name: Run the default task
+        run: bundle exec rake
+        env:
+          REDIS_URL: redis://localhost:6379
+
+      - name: Build Gem
+        run: bundle exec rake build
+
+      - name: Push to Internal Registry
+        run: bundle exec gem push pkg/$GEM_NAME-$RELEASE_TAG.gem --key github --host "https://rubygems.pkg.github.com/packfiles"
+
+      #- name: Push to RubyGems
+      #  run: bundle exec gem push pkg/$GEM_NAME-$RELEASE_TAG.gem --key rubygems --host "https://rubygems.org"
