@@ -12,13 +12,12 @@ Cymometer uses Redis sorted sets and Lua scripts to maintain atomic increment an
 - **Configurable Limits:** Set custom limits and time windows for your counters.
 - **Transaction Support:** Execute blocks of code only if the counter can be incremented.
 - **No Redis Client Dependency:** Works with any Redis client, as long as you assign it to `Cymometer.redis`.
+- **Helper DSL:** Optional, makes it easy to add per-class, named rate limiters to jobs, service objects, or any Ruby class.
 
 ## Installation
 
 ```ruby
-packfiles_internal do
-  gem 'cymometer'
-end 
+gem 'cymometer'
 ```
 
 ## Usage
@@ -36,6 +35,29 @@ redis = Redis.new(host: 'localhost', port: 6379, db: 0)
 
 # Assign Redis client to Cymometer
 Cymometer.redis = redis
+```
+
+The Cymometer gem does not specify a dependency on a particular Redis client. You can configure a default Redis client to be used by all Cymometer counters, or supply one to the `Cymometer::Counter` initializer.
+
+#### Global Configuration
+
+```ruby
+custom_redis = Redis.new(host: 'localhost', port: 6379, db: 1)
+Cymometer.redis = custom_redis
+```
+
+#### Per-Counter Configuration
+
+```ruby
+custom_redis = Redis.new(host: 'localhost', port: 6379, db: 1)
+
+counter = Cymometer::Counter.new(
+  key_namespace: 'api',
+  key: 'user_456',
+  limit: 500,
+  window: 1800,     # 30 minutes
+  redis: custom_redis
+)
 ```
 
 ### Create a Counter 
@@ -85,6 +107,14 @@ puts "Counter decremented. Current count: #{count}"
 
 The `decrement!` method safely decrements the counter by removing the oldest entry. If the counter is already at zero, it remains unchanged.
 
+### Getting the Current Count
+
+To retrieve the current count without modifying the counter:
+
+```ruby
+puts "Current count: #{counter.count}"
+```
+
 ### Using Transactions
 
 Transactions allow you to execute a block of code only if the counter can be incremented:
@@ -126,8 +156,6 @@ rescue => e
 end
 ```
 
-##### Use Cases 
-
 ###### Rollback Enabled (default)
 
 Useful when you want to ensure that only successful actions count against the rate limit (e.g., API endpoints where you don’t want failed requests (due to server errors) to penalize the user).
@@ -136,39 +164,139 @@ Useful when you want to ensure that only successful actions count against the ra
 
 Useful when you want all attempts, successful or not, to count against the rate limit to prevent abuse (e.g., login attempts where you need to prevent brute-force attacks by limiting the number of attempts regardless of success).
 
+### Cymometer::Helper DSL
 
-### Getting the Current Count
+The `Cymometer::Helper` DSL makes it easy to add per-class, named rate limiters to jobs, service objects, or any Ruby class. Counters are lazily instantiated and memoized per instance, so repeat calls are efficient. You declare your counters and options up front with a simple block, then access them with the counter method. No boilerplate required!
 
-To retrieve the current count without modifying the counter:
+#### When to Use
+- **Background jobs:** Limit how often certain work can be performed per job type or account.
+- **Custom service classes:** Rate limit expensive or risky operations across different classes or namespaces.
+- **Dynamic keys:** Build counter keys from instance data (e.g., a user ID, IP address, etc) at runtime.
+
+#### How It Works
+1. Include the module in your class.
+2. Declare counters and options in a configure_cymometer block using a simple DSL.
+3. Access counters by name with counter(:counter_name) anywhere in your class.
+
+#### DSL Options
+- `namespace "my_app"`: Sets a prefix for all counter keys.
+- `counter :name do ... end`: Defines a new counter. Inside the block, you can specify:
+  - `limit`: Max actions per window.
+  - `window`: Time window in seconds.
+  - `key { ... }`: (Optional) Block to dynamically build the counter's unique key using instance data.
+
+
+Here's an example:
 
 ```ruby
-puts "Current count: #{counter.count}"
+class MyJob
+  include Cymometer::Helper
+
+  configure_cymometer do
+    namespace "my_app"
+
+    counter :fast_calls do
+      limit 10        # max 10 per window
+      window 30       # 30 seconds
+    end
+
+    counter :slow_calls do
+      limit 3
+      window 300      # 5 minutes
+      key { some_dynamic_method } # key is built at runtime
+    end
+  end
+
+  def perform
+    # Increment and check the :fast_calls rate limit
+    counter(:fast_calls).increment!
+
+    # Use a transaction for the :slow_calls counter
+    counter(:slow_calls).transaction do
+      do_something_slow
+    end
+  end
+
+  private
+
+  def some_dynamic_method
+    "user_#{user_id}"
+  end
+end
 ```
 
-### Configuring Redis
+> [!NOTE]
+> Centralizing your rate limits into configuration (e.g, `Rails.application.config_for(:rate_limits)[:my_job][:fast_calls]` in Rails) is a great way to keep them clear, maintainable, and easy to test.
 
-The Cymometer gem does not specify a dependency on a particular Redis client. You can configure a default Redis client to be used by all Cymometer counters, or supply one to the `Cymometer::Counter` initializer.
+#### Testing with Cymometer::Helper
 
-#### Global Configuration
+<details>
+
+<summary> 🛠️ Tips and Tricks </summary>
+
+
+`Cymometer::Helper` makes it very straightforward to test rate limiting configuration and behavior in your test suite. We'll use RSpec for these examples, but you could achieve the same result with Minitest or your preferred test suite.
+
+To start, create a `Cymometer::Counter` test double:
 
 ```ruby
-custom_redis = Redis.new(host: 'localhost', port: 6379, db: 1)
-Cymometer.redis = custom_redis
+let(:test_counter) { instance_double("Cymometer::Counter") }
 ```
 
-#### Per-Counter Configuration
+Then, add some stubs. In the example below, we configure spy methods to return our test double from `Cymometer::Counter#new`, and configure the `transaction` and `increment!` methods to increment an instance variable counter for our tests. 
 
 ```ruby
-custom_redis = Redis.new(host: 'localhost', port: 6379, db: 1)
+  allow(Cymometer::Counter).to receive(:new).and_return(test_counter)
+  @transactions_counter = 0
 
-counter = Cymometer::Counter.new(
-  key_namespace: 'api',
-  key: 'user_456',
-  limit: 500,
-  window: 1800,     # 30 minutes
-  redis: custom_redis
-)
+  allow(test_counter).to receive(:transaction) do |&block|
+    @transactions_counter += 1
+    block&.call
+  end
+
+  allow(test_counter).to receive(:increment!) { @transactions_counter += 1 }
 ```
+
+You can then wire up tests for rate limiting behavior. Here's an example:
+
+
+```ruby
+  describe "rate limiting behavior" do
+    before do
+      @transactions_counter = 0
+    end
+
+    # Tests for configuration
+    it "configures and uses Cymometer counters for rate limiting" do
+      counters = described_class.cymometer_counters
+
+      expect(counters[:hour_api_calls]).not_to be_nil
+      expect(counters[:hour_api_calls][:limit]).to equal(Rails.application.config_for(:rate_limits)[:api_calls_job][:per_hour])
+      expect(counters[:hour_api_calls][:window]).to equal(1.hour.to_i)
+    end
+
+    # Tests for behavior
+    context "for a project in trial mode" do
+      let(:job) { described_class.new }
+
+      before do
+        allow(project).to receive(:trial_mode?).and_return(true)
+      end
+
+      it "increments all counters" do
+        @transactions_counter = 0
+
+        described_class.perform_now(backlog_entry)
+
+        expect(@transactions_counter).to eq(2)
+      end
+    end
+  end
+
+```
+
+</details>
+
 
 ## Development
 

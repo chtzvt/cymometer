@@ -66,5 +66,5 @@ jobs:
       - name: Push to Internal Registry
         run: bundle exec gem push pkg/$GEM_NAME-$RELEASE_TAG.gem --key github --host "https://rubygems.pkg.github.com/packfiles"
 
-      #- name: Push to RubyGems
-      #  run: bundle exec gem push pkg/$GEM_NAME-$RELEASE_TAG.gem --key rubygems --host "https://rubygems.org"
+      - name: Push to RubyGems
+        run: bundle exec gem push pkg/$GEM_NAME-$RELEASE_TAG.gem --key rubygems --host "https://rubygems.org"
