@@ -59,6 +59,8 @@ module Cymometer
       @key = "#{key_namespace || "cymometer"}:#{key || generate_key}"
       @window = window || DEFAULT_WINDOW
       @limit = limit || 1
+      @increment_sha = nil
+      @decrement_sha = nil
     end
 
     # Atomically increments the counter and checks the limit
@@ -66,7 +68,8 @@ module Cymometer
       current_time = (Time.now.to_f * 1_000_000).to_i # Microseconds
       window = @window * 1_000_000 # Convert to microseconds
 
-      result = @redis.eval(
+      result = evalsha_with_fallback(
+        :increment,
         INCREMENT_LUA_SCRIPT,
         keys: [@key],
         argv: [current_time, window, @limit]
@@ -85,7 +88,8 @@ module Cymometer
       current_time = (Time.now.to_f * 1_000_000).to_i
       window = @window * 1_000_000
 
-      result = @redis.eval(
+      result = evalsha_with_fallback(
+        :decrement,
         DECREMENT_LUA_SCRIPT,
         keys: [@key],
         argv: [current_time, window]
@@ -120,6 +124,25 @@ module Cymometer
 
     def generate_key
       SecureRandom.uuid
+    end
+
+    def evalsha_with_fallback(type, script, keys:, argv:)
+      sha_var = (type == :increment) ? :@increment_sha : :@decrement_sha
+
+      sha = instance_variable_get(sha_var)
+      begin
+        # Try EVALSHA first
+        sha ||= @redis.script(:load, script)
+        instance_variable_set(sha_var, sha)
+        @redis.evalsha(sha, keys: keys, argv: argv)
+      rescue Redis::CommandError => e
+        raise unless e.message.include?("NOSCRIPT")
+
+        # If the script wasn't loaded, reload and try again
+        sha = @redis.script(:load, script)
+        instance_variable_set(sha_var, sha)
+        @redis.evalsha(sha, keys: keys, argv: argv)
+      end
     end
   end
 end
