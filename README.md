@@ -6,6 +6,8 @@ Cymometer is a decaying counter for rate limiting using Redis. It provides a sim
 
 Cymometer uses Redis sorted sets and Lua scripts to maintain atomic increment and decrement operations, ensuring accurate and thread-safe counting in distributed systems.
 
+Cymometer is designed for simplicity and geared towards the distributed systems use case, such as applying rate-limiting to an application's business logic, background job processing, consumption of external APIs, and so on. Cymometer can also be used for request-based rate limiting, but gems like [rack-attack](https://github.com/rack/rack-attack) or Rails 8's [built-in rate limiting API](https://edgeguides.rubyonrails.org/security.html#brute-forcing-accounts) suit these applications well.
+
 ### Features
 
 - **Atomic Operations:** Uses Redis Lua scripts for atomic increment and decrement.
@@ -297,6 +299,47 @@ You can then wire up tests for rate limiting behavior. Here's an example:
 
 </details>
 
+### Patterns
+
+#### Retry with ActiveJob 
+
+If you're using Cymometer to rate limit background jobs (perhaps ones that consume an external API), you can use ActiveJob's `retry_on` mechanism to re-enqueue the job automatically if a rate limit exception is raised:
+
+```ruby
+retry_on Cymometer::Counter::LimitExceeded, wait: :polynomially_longer, attempts: :unlimited, jitter: 0.5
+```
+
+Depending on your setup, you might also combine Cymometer with [concurrency limiting](https://github.com/rails/solid_queue/?tab=readme-ov-file#concurrency-controls) and [job uniqueness](https://github.com/veeqo/activejob-uniqueness) mechanisms for finer-grained control.
+
+
+#### Interlocking Rate Limits
+
+Sometimes, you might be working with an external API or system that imposes multi-level rate limits, e.g.:
+
+- No more than X requests _per hour_, **and** no more than Y requests _per minute_.
+
+Thankfully, this is easy to address with Cymometer: Just nest transactions and increment operations against multiple counters alongside or within one another. 
+
+You have a few options to consider depending on rollback behavior, exception handling, and so on.
+
+```ruby
+counter(:per_hour).increment!
+counter(:per_minute).increment!
+
+# Or: 
+
+counter(:per_hour).transaction do
+  counter(:per_minute).increment!
+end
+
+# Or: 
+
+counter(:per_hour).transaction do
+  counter(:per_minute).transaction do 
+    # Do your thing...
+  end 
+end
+```
 
 ## Development
 
