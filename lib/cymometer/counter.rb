@@ -1,4 +1,5 @@
 require "securerandom"
+require "digest/sha1"
 
 module Cymometer
   class Counter
@@ -8,7 +9,7 @@ module Cymometer
 
     attr_reader :window, :limit, :key
 
-    INCREMENT_LUA_SCRIPT = <<-LUA
+    INCREMENT_LUA_SCRIPT = <<-LUA.freeze
       local key = KEYS[1]
       local current_time = tonumber(ARGV[1])
       local window = tonumber(ARGV[2])
@@ -31,7 +32,7 @@ module Cymometer
       end
     LUA
 
-    DECREMENT_LUA_SCRIPT = <<-LUA
+    DECREMENT_LUA_SCRIPT = <<-LUA.freeze
       local key = KEYS[1]
       local current_time = tonumber(ARGV[1])
       local window = tonumber(ARGV[2])
@@ -54,13 +55,18 @@ module Cymometer
       end
     LUA
 
+    @increment_sha = Digest::SHA1.hexdigest(INCREMENT_LUA_SCRIPT).freeze
+    @decrement_sha = Digest::SHA1.hexdigest(DECREMENT_LUA_SCRIPT).freeze
+
+    class << self
+      attr_reader :increment_sha, :decrement_sha
+    end
+
     def initialize(key_namespace: nil, key: nil, limit: nil, window: nil, redis: nil)
       @redis = redis || Cymometer.redis
       @key = "#{key_namespace || "cymometer"}:#{key || generate_key}"
       @window = window || DEFAULT_WINDOW
       @limit = limit || 1
-      @increment_sha = nil
-      @decrement_sha = nil
     end
 
     # Atomically increments the counter and checks the limit
@@ -70,7 +76,6 @@ module Cymometer
 
       result = evalsha_with_fallback(
         :increment,
-        INCREMENT_LUA_SCRIPT,
         keys: [@key],
         argv: [current_time, window, @limit]
       )
@@ -90,7 +95,6 @@ module Cymometer
 
       result = evalsha_with_fallback(
         :decrement,
-        DECREMENT_LUA_SCRIPT,
         keys: [@key],
         argv: [current_time, window]
       )
@@ -126,23 +130,16 @@ module Cymometer
       SecureRandom.uuid
     end
 
-    def evalsha_with_fallback(type, script, keys:, argv:)
-      sha_var = (type == :increment) ? :@increment_sha : :@decrement_sha
+    def evalsha_with_fallback(type, keys:, argv:)
+      script = (type == :increment) ? INCREMENT_LUA_SCRIPT : DECREMENT_LUA_SCRIPT
+      sha = (type == :increment) ? self.class.increment_sha : self.class.decrement_sha
 
-      sha = instance_variable_get(sha_var)
-      begin
-        # Try EVALSHA first
-        sha ||= @redis.script(:load, script)
-        instance_variable_set(sha_var, sha)
-        @redis.evalsha(sha, keys: keys, argv: argv)
-      rescue Redis::CommandError => e
-        raise unless e.message.include?("NOSCRIPT")
+      @redis.evalsha(sha, keys: keys, argv: argv)
+    rescue Redis::CommandError => e
+      raise unless e.message.include?("NOSCRIPT")
 
-        # If the script wasn't loaded, reload and try again
-        sha = @redis.script(:load, script)
-        instance_variable_set(sha_var, sha)
-        @redis.evalsha(sha, keys: keys, argv: argv)
-      end
+      @redis.script(:load, script)
+      @redis.evalsha(sha, keys: keys, argv: argv)
     end
   end
 end
