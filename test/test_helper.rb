@@ -9,7 +9,12 @@ require "redis"
 CYMOMETER_TEST_REDIS_DB = 15
 CYMOMETER_TEST_REDIS_URL = "redis://localhost:6379"
 
-Cymometer.redis = Redis.new(url: ENV["REDIS_URL"] || CYMOMETER_TEST_REDIS_URL, db: ENV["REDIS_DB"] || CYMOMETER_TEST_REDIS_DB)
+REDIS_CLIENT_OPTS = {
+  url: ENV["REDIS_URL"] || CYMOMETER_TEST_REDIS_URL,
+  db: ENV["REDIS_DB"] || CYMOMETER_TEST_REDIS_DB
+}
+
+Cymometer.redis = Redis.new(**REDIS_CLIENT_OPTS)
 
 module Minitest
   class Test
